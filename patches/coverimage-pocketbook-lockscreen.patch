@@ -1,0 +1,121 @@
+diff --git a/plugins/coverimage.koplugin/main.lua b/plugins/coverimage.koplugin/main.lua
+index d2bf9e0e5..ec31d458a 100644
+--- a/plugins/coverimage.koplugin/main.lua
++++ b/plugins/coverimage.koplugin/main.lua
+@@ -5,6 +5,7 @@ Plugin for saving a cover image to a file and scaling it to fit the screen.
+ ]]
+ 
+ local Device = require("device")
++local ffi = require("ffi")
+ 
+ if not (Device.isAndroid() or Device.isEmulator() or Device.isRemarkable() or Device.isPocketBook()) then
+     return { disabled = true }
+@@ -107,16 +108,79 @@ function CoverImage:cleanUpImage()
+         os.remove(self.cover_image_path)
+     elseif isFileOk(self.cover_image_path) then
+         ffiutil.copyFile(self.cover_image_fallback_path, self.cover_image_path)
+-        self:updatePocketBookBootLogo()
++        self:updatePocketBookImages()
+     end
+ end
+ 
+-function CoverImage:updatePocketBookBootLogo()
++local function mkdirParents(path)
++    local current = ""
++    for part in path:gmatch("[^/]+") do
++        current = current .. "/" .. part
++        if lfs.attributes(current, "mode") ~= "directory" then
++            lfs.mkdir(current)
++        end
++    end
++end
++
++-- PocketBook keeps the image shown by its own lock/sleep screen here.
++-- Keeping this in sync with the KOReader cover makes the native PocketBook
++-- UI show the last book cover as well (e.g. after leaving KOReader).
++local pocketbook_sleep_image_path = "/mnt/ext1/system/resources/Line/taskmgr_lock_background.bmp"
++
++function CoverImage:updatePocketBookSleepImage()
++    if not Device.isPocketBook() then
++        return
++    end
++    if self.cover_image_path == pocketbook_sleep_image_path then
++        return
++    end
++    local sleep_dir = pocketbook_sleep_image_path:match("^(.*)/[^/]+$")
++    if sleep_dir then
++        mkdirParents(sleep_dir)
++    end
++    local image = RenderImage:renderImageFile(self.cover_image_path)
++    if not image then
++        logger.warn("CoverImage: cannot load cover for PocketBook sleep image:", self.cover_image_path)
++        return
++    end
++    -- Color PocketBooks accept a 24-bit BMP; monochrome models need grayscale.
++    local grayscale = not Device:hasColorScreen()
++    local image_to_write = image
++    if not grayscale then
++        -- Match the saturation/dithering processing KOReader itself applies to
++        -- PocketBook color framebuffer updates; otherwise the native lock image
++        -- looks noticeably washed out.
++        if image:getType() ~= Blitbuffer.TYPE_BBRGB24 then
++            image_to_write = Blitbuffer.new(image:getWidth(), image:getHeight(), Blitbuffer.TYPE_BBRGB24)
++            image_to_write:blitFrom(image)
++        end
++        local inkview = require("ffi/inkview")
++        local ok, err = pcall(inkview.adjustAreaDefault,
++            ffi.cast("unsigned char *", image_to_write.data),
++            tonumber(image_to_write.stride), image_to_write:getWidth(), image_to_write:getHeight())
++        if not ok then
++            logger.warn("CoverImage: inkview color adjustment failed:", tostring(err))
++        end
++    end
++    if image_to_write:writeToFile(pocketbook_sleep_image_path, "bmp", self.cover_image_quality, grayscale) then
++        logger.dbg("CoverImage: PocketBook sleep image updated:", pocketbook_sleep_image_path)
++    else
++        logger.warn("CoverImage: error writing PocketBook sleep image:", pocketbook_sleep_image_path)
++    end
++    if image_to_write ~= image then
++        image_to_write:free()
++    end
++    image:free()
++    os.execute("sync")
++end
++
++function CoverImage:updatePocketBookImages()
+     if Device.isPocketBook() then
+         logger.dbg("CoverImage: updating PocketBook boot logo from", self.cover_image_path)
+         os.execute("sync")
+         -- iv2sh is run in background because it can be very slow and would block KOReader.
+         os.execute("iv2sh WriteStartupLogo " .. util.shell_escape({self.cover_image_path}) .. " &")
++        self:updatePocketBookSleepImage()
+     end
+ end
+ 
+@@ -135,7 +199,7 @@ function CoverImage:createCoverImage(doc_settings)
+         logger.dbg("CoverImage: cache file already exists")
+         ffiutil.copyFile(cache_file, self.cover_image_path)
+         lfs.touch(cache_file) -- update date
+-        self:updatePocketBookBootLogo()
++        self:updatePocketBookImages()
+         return
+     end
+ 
+@@ -170,7 +234,7 @@ function CoverImage:createCoverImage(doc_settings)
+         end
+         cover_image:free()
+         ffiutil.copyFile(self.cover_image_path, cache_file)
+-        self:updatePocketBookBootLogo()
++        self:updatePocketBookImages()
+         self:cleanCache()
+         return
+     end
+@@ -215,7 +279,7 @@ function CoverImage:createCoverImage(doc_settings)
+     logger.dbg("CoverImage: image written to " .. self.cover_image_path)
+ 
+     ffiutil.copyFile(self.cover_image_path, cache_file)
+-    self:updatePocketBookBootLogo()
++    self:updatePocketBookImages()
+     self:cleanCache()
+ end
+ 
